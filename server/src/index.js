@@ -26,12 +26,29 @@ app.use(helmet());
 
 // CORS
 // Using "*" temporarily for local + ngrok testing.
+// app.use(
+//   cors({
+//     origin: "*",
+//     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+//     allowedHeaders: ["Content-Type", "Authorization"],
+//   }),
+// );
 app.use(
   cors({
-    origin: "*",
+    origin: [
+      "https://localhost:5173",
+      "https://192.168.1.3:5173",
+      "http://localhost:5173",
+      "https://duplex-slate-kilobyte.ngrok-free.dev",
+    ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
+    credentials: true,
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "ngrok-skip-browser-warning",
+    ],
+  })
 );
 
 app.use(express.json({ limit: "10kb" }));

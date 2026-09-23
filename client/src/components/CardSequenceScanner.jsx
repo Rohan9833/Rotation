@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ACTIONS, MARKER_IDS } from "../actions";
 
-const STABLE_FRAMES = 5;
+const STABLE_FRAMES = 6;
 const LOST_FRAMES = 12;
 const DETECT_INTERVAL = 80;
 const MAX_WIDTH = 960;
@@ -9,29 +9,33 @@ const MAX_WIDTH = 960;
 // Rotation reference
 const REFERENCE_ANGLE = 45;
 
-// Movement threshold
-const MOVEMENT_THRESHOLD = 40;
+// Number of recent readings used to smooth rotation
+const ROTATION_SMOOTHING_FRAMES = 7;
 
-// Redirect delay
+// ==========================================
+// SWIPE / GESTURE DETECTION
+// ==========================================
+
+// Minimum total movement before a swipe
+// can be considered
+const MOVEMENT_THRESHOLD = 80;
+
+// Number of position samples used to
+// smooth the card position (reduces ArUco
+// jitter without making the swipe feel laggy)
+const MOVEMENT_SMOOTHING_FRAMES = 4;
+
+// How many consecutive frames the direction
+// must remain consistent before triggering
+const MOVEMENT_STABLE_FRAMES = 3;
+
+// Distance from start position at which the
+// gesture is considered "returned" and the
+// detector re-arms
+const MOVEMENT_RESET_THRESHOLD = 35;
+
+// Popup delay
 const REDIRECT_DELAY = 1500;
-
-// ==========================================
-// WEBSITES
-// ==========================================
-
-const WEBSITES = {
-  UP: "https://digilateral.com",
-  DOWN: "http://solaresppm.digilateral.com/",
-
-  LEFT: "https://www.instagram.com/",
-  RIGHT: "https://www.facebook.com/",
-
-  // 0-90 intentionally has NO website
-
-  ROTATION_90_180: "https://www.youtube.com/",
-  ROTATION_180_270: "https://www.wikipedia.org/",
-  ROTATION_270_360: "https://github.com/",
-};
 
 export default function CardRotationScanner({ onTrigger }) {
   const videoRef = useRef(null);
@@ -42,50 +46,51 @@ export default function CardRotationScanner({ onTrigger }) {
   // ==========================================
 
   const [mode, setMode] = useState("ROTATE");
-
   const modeRef = useRef("ROTATE");
+
+  // ==========================================
+  // CALLBACK
+  // ==========================================
+
+  const onTriggerRef = useRef(onTrigger);
 
   // ==========================================
   // ROTATION STATE
   // ==========================================
 
   const triggeredRef = useRef("");
-  const onTriggerRef = useRef(onTrigger);
+  const rotationTriggeredRef = useRef("");
+
+  // Recent rotation readings.
+  const rotationSamplesRef = useRef([]);
 
   // ==========================================
-  // PREVIOUS CENTER
+  // MOVEMENT STATE
   // ==========================================
 
-  const previousCenterRef = useRef(null);
+  // Smoothed card position history
+  const positionSamplesRef = useRef([]);
 
-  // ==========================================
-  // STARTING POSITION
-  // ==========================================
-
+  // Smoothed starting position (baseline)
   const startXRef = useRef(null);
   const startYRef = useRef(null);
 
-  // ==========================================
-  // MOVEMENT TRIGGER STATE
-  // ==========================================
+  // Direction stability tracking
+  const directionStreakRef = useRef("");
+  const directionStreakCountRef = useRef(0);
 
-  const movementTriggeredRef = useRef("");
-
-  // ==========================================
-  // ROTATION WEBSITE STATE
-  // ==========================================
-
-  const rotationTriggeredRef = useRef("");
+  // Locked after a swipe fires, until the card
+  // returns near the baseline.
+  const movementLockedRef = useRef(false);
 
   // ==========================================
-  // REDIRECT STATE
+  // POPUP STATE
   // ==========================================
 
-  const redirectTimeoutRef = useRef(null);
-  const redirectLockedRef = useRef(false);
+  const popupTimeoutRef = useRef(null);
+  const popupLockedRef = useRef(false);
 
   const [redirectMessage, setRedirectMessage] = useState("");
-
   const [redirectVisible, setRedirectVisible] = useState(false);
 
   // ==========================================
@@ -106,63 +111,39 @@ export default function CardRotationScanner({ onTrigger }) {
   const [error, setError] = useState("");
 
   // ==========================================
-  // OPEN WEBSITE
-  // ==========================================
-
-  const openWebsite = (url) => {
-    if (!url) {
-      return;
-    }
-
-    const win = window.open(url, "cardTargetTab");
-
-    if (!win) {
-      console.log("Popup blocked by browser");
-
-      setError("Popup blocked. Allow popups for this site.");
-    }
-  };
-
-  // ==========================================
-  // SHOW REDIRECT POPUP
-  // ==========================================
-
-  const showRedirect = (message, url) => {
-    if (!url) {
-      return;
-    }
-
-    // Prevent another redirect while
-    // current 1.5 second redirect is pending
-    if (redirectLockedRef.current) {
-      return;
-    }
-
-    redirectLockedRef.current = true;
-
-    setRedirectMessage(message);
-    setRedirectVisible(true);
-
-    console.log("REDIRECT IN 1.5 SECONDS:", message);
-
-    redirectTimeoutRef.current = setTimeout(() => {
-      setRedirectVisible(false);
-
-      openWebsite(url);
-
-      // Unlock after redirect
-      redirectLockedRef.current = false;
-      redirectTimeoutRef.current = null;
-    }, REDIRECT_DELAY);
-  };
-
-  // ==========================================
   // UPDATE CALLBACK
   // ==========================================
 
   useEffect(() => {
     onTriggerRef.current = onTrigger;
   }, [onTrigger]);
+
+  // ==========================================
+  // SHOW ACTION POPUP
+  // ==========================================
+
+  const showRedirect = (message) => {
+    if (!message) {
+      return;
+    }
+
+    if (popupLockedRef.current) {
+      return;
+    }
+
+    popupLockedRef.current = true;
+
+    setRedirectMessage(message);
+    setRedirectVisible(true);
+
+    console.log("ACTION SENT TO DISPLAY:", message);
+
+    popupTimeoutRef.current = setTimeout(() => {
+      setRedirectVisible(false);
+      popupLockedRef.current = false;
+      popupTimeoutRef.current = null;
+    }, REDIRECT_DELAY);
+  };
 
   // ==========================================
   // CHANGE MODE
@@ -172,41 +153,45 @@ export default function CardRotationScanner({ onTrigger }) {
     modeRef.current = newMode;
     setMode(newMode);
 
-    // Cancel pending redirect
-    if (redirectTimeoutRef.current) {
-      clearTimeout(redirectTimeoutRef.current);
-
-      redirectTimeoutRef.current = null;
+    // Cancel popup
+    if (popupTimeoutRef.current) {
+      clearTimeout(popupTimeoutRef.current);
+      popupTimeoutRef.current = null;
     }
 
-    redirectLockedRef.current = false;
+    popupLockedRef.current = false;
 
     setRedirectVisible(false);
     setRedirectMessage("");
 
     // Reset movement
-    movementTriggeredRef.current = "";
+    positionSamplesRef.current = [];
+    startXRef.current = null;
+    startYRef.current = null;
+
+    directionStreakRef.current = "";
+    directionStreakCountRef.current = 0;
+
+    movementLockedRef.current = false;
 
     // Reset rotation
     rotationTriggeredRef.current = "";
     triggeredRef.current = "";
 
-    // Reset starting position
-    startXRef.current = null;
-    startYRef.current = null;
-
-    // Reset previous center
-    previousCenterRef.current = null;
+    rotationSamplesRef.current = [];
 
     // Reset UI
     setActive("");
     setLive("");
+    setAngle(null);
+    setDx(0);
+    setDy(0);
 
     console.log("MODE CHANGED:", newMode);
   };
 
   // ==========================================
-  // MAIN EFFECT
+  // MAIN CAMERA / DETECTION EFFECT
   // ==========================================
 
   useEffect(() => {
@@ -223,20 +208,29 @@ export default function CardRotationScanner({ onTrigger }) {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
+    if (!video || !canvas) {
+      return;
+    }
+
     const ctx = canvas.getContext("2d", {
       willReadFrequently: true,
     });
 
     let raf;
     let stream;
-
     let last = 0;
 
-    // Rotation stability
+    // ==========================================
+    // ROTATION STABILITY
+    // ==========================================
+
     let lastState = "";
     let stable = 0;
 
-    // Marker lost counter
+    // ==========================================
+    // MARKER LOST COUNTER
+    // ==========================================
+
     let lost = 0;
 
     let cancelled = false;
@@ -265,7 +259,6 @@ export default function CardRotationScanner({ onTrigger }) {
       const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
 
       const w = Math.round(video.videoWidth * scale);
-
       const h = Math.round(video.videoHeight * scale);
 
       if (canvas.width !== w || canvas.height !== h) {
@@ -310,7 +303,6 @@ export default function CardRotationScanner({ onTrigger }) {
         // ========================================
 
         ctx.strokeStyle = "#22c55e";
-
         ctx.lineWidth = 4;
 
         ctx.beginPath();
@@ -347,22 +339,29 @@ export default function CardRotationScanner({ onTrigger }) {
         if (lost >= LOST_FRAMES) {
           // Reset rotation
           triggeredRef.current = "";
-
           rotationTriggeredRef.current = "";
 
-          // Reset movement
-          movementTriggeredRef.current = "";
+          rotationSamplesRef.current = [];
 
-          // Reset starting position
+          // Reset movement gesture state
+          positionSamplesRef.current = [];
+
           startXRef.current = null;
-
           startYRef.current = null;
 
-          previousCenterRef.current = null;
+          directionStreakRef.current = "";
+          directionStreakCountRef.current = 0;
+
+          movementLockedRef.current = false;
 
           // Reset rotation stability
           lastState = "";
           stable = 0;
+
+          // Reset displayed rotation
+          setAngle(null);
+          setDx(0);
+          setDy(0);
         }
 
         return;
@@ -375,16 +374,39 @@ export default function CardRotationScanner({ onTrigger }) {
       // ==========================================
 
       const marker1 = found.get(MARKER_IDS[0]);
-
       const marker2 = found.get(MARKER_IDS[1]);
 
       // ==========================================
-      // CARD CENTER
+      // RAW CARD CENTER
       // ==========================================
 
-      const centerX = (marker1.center.x + marker2.center.x) / 2;
+      const rawCenterX = (marker1.center.x + marker2.center.x) / 2;
 
-      const centerY = (marker1.center.y + marker2.center.y) / 2;
+      const rawCenterY = (marker1.center.y + marker2.center.y) / 2;
+
+      // ==========================================
+      // POSITION SMOOTHING
+      // ==========================================
+      //
+      // Light smoothing only — enough to remove
+      // ArUco jitter without making swipe feel laggy.
+
+      const posSamples = positionSamplesRef.current;
+
+      posSamples.push({
+        x: rawCenterX,
+        y: rawCenterY,
+      });
+
+      if (posSamples.length > MOVEMENT_SMOOTHING_FRAMES) {
+        posSamples.shift();
+      }
+
+      const centerX =
+        posSamples.reduce((sum, s) => sum + s.x, 0) / posSamples.length;
+
+      const centerY =
+        posSamples.reduce((sum, s) => sum + s.y, 0) / posSamples.length;
 
       setX(centerX);
       setY(centerY);
@@ -402,7 +424,7 @@ export default function CardRotationScanner({ onTrigger }) {
       ctx.fill();
 
       // ==========================================
-      // SAVE STARTING X/Y
+      // SAVE STARTING X/Y (SMOOTHED)
       // ==========================================
 
       if (startXRef.current === null) {
@@ -436,11 +458,41 @@ export default function CardRotationScanner({ onTrigger }) {
           180) /
         Math.PI;
 
+      // ==========================================
+      // NORMALIZE ROTATION
+      // ==========================================
+
       let rotation = rawDeg - REFERENCE_ANGLE;
 
       rotation = ((rotation % 360) + 360) % 360;
 
-      setAngle(rotation);
+      // ==========================================
+      // ROTATION SMOOTHING
+      // ==========================================
+
+      const samples = rotationSamplesRef.current;
+
+      samples.push(rotation);
+
+      if (samples.length > ROTATION_SMOOTHING_FRAMES) {
+        samples.shift();
+      }
+
+      const sinSum = samples.reduce(
+        (sum, value) => sum + Math.sin((value * Math.PI) / 180),
+        0,
+      );
+
+      const cosSum = samples.reduce(
+        (sum, value) => sum + Math.cos((value * Math.PI) / 180),
+        0,
+      );
+
+      let smoothedRotation = (Math.atan2(sinSum, cosSum) * 180) / Math.PI;
+
+      smoothedRotation = ((smoothedRotation % 360) + 360) % 360;
+
+      setAngle(smoothedRotation);
 
       // ==========================================
       // ROTATION RANGE
@@ -448,228 +500,222 @@ export default function CardRotationScanner({ onTrigger }) {
 
       let rotationRange = "";
 
-      if (rotation >= 0 && rotation < 90) {
+      if (smoothedRotation >= 0 && smoothedRotation < 90) {
         rotationRange = "0-90";
-      } else if (rotation >= 90 && rotation < 180) {
+      } else if (smoothedRotation >= 90 && smoothedRotation < 180) {
         rotationRange = "90-180";
-      } else if (rotation >= 180 && rotation < 270) {
+      } else if (smoothedRotation >= 180 && smoothedRotation < 270) {
         rotationRange = "180-270";
       } else {
         rotationRange = "270-360";
       }
 
       // ==========================================
-      // ROTATION STABILITY
+      // RANGE STABILITY
       // ==========================================
 
-      const state = String(Math.round(rotation / 90) * 90);
-
-      if (state === lastState) {
+      if (rotationRange === lastState) {
         stable++;
       } else {
-        lastState = state;
+        lastState = rotationRange;
         stable = 1;
       }
 
       // ==========================================
-      // ROTATE MODE
+      // ROTATE MODE (UNCHANGED)
       // ==========================================
 
       if (modeRef.current === "ROTATE") {
         setLive(rotationRange);
 
-        // ========================================
-        // ACTIVE ROTATION ACTION
-        // ========================================
+        if (stable >= STABLE_FRAMES) {
+          // ======================================
+          // FIRST DETECTION — STORE ONLY
+          // ======================================
 
-        const bucket = (Math.round(rotation / 90) * 90) % 360;
-
-        if (stable >= STABLE_FRAMES && state !== triggeredRef.current) {
-          triggeredRef.current = state;
-
-          setActive(String(bucket));
-
-          onTriggerRef.current?.({
-            type: "ROTATION",
-            degree: rotation,
-            bucket,
-          });
-        }
-
-        // ========================================
-        // FIRST ROTATION DETECTION
-        // ========================================
-
-        if (rotationTriggeredRef.current === "") {
-          if (stable >= STABLE_FRAMES) {
+          if (rotationTriggeredRef.current === "") {
             rotationTriggeredRef.current = rotationRange;
 
-            console.log("INITIAL ROTATION:", rotationRange);
-          }
-        }
+            console.log(
+              "INITIAL ROTATION STORED:",
+              rotationRange,
+              `${smoothedRotation.toFixed(1)}°`,
+            );
 
-        // ========================================
-        // ROTATION RANGE CHANGED
-        // ========================================
-        else if (
-          stable >= STABLE_FRAMES &&
-          rotationRange !== rotationTriggeredRef.current &&
-          !redirectLockedRef.current
-        ) {
-          rotationTriggeredRef.current = rotationRange;
-
-          console.log("ROTATION CHANGED:", rotationRange);
-
-          onTriggerRef.current?.({
-            type: "ROTATION",
-            degree: rotation,
-            range: rotationRange,
-          });
-
-          // ======================================
-          // 0-90
-          // ======================================
-
-          if (rotationRange === "0-90") {
-            console.log("0-90: No website");
-          }
-
-          // ======================================
-          // 90-180
-          // ======================================
-          else if (rotationRange === "90-180") {
-            showRedirect(
-              `ROTATED ${Math.round(rotation)}°`,
-              WEBSITES.ROTATION_90_180,
+            setActive(
+              rotationRange === "0-90"
+                ? "0"
+                : rotationRange === "90-180"
+                  ? "90"
+                  : rotationRange === "180-270"
+                    ? "180"
+                    : "270",
             );
           }
 
           // ======================================
-          // 180-270
+          // ROTATION CHANGED
           // ======================================
-          else if (rotationRange === "180-270") {
-            showRedirect(
-              `ROTATED ${Math.round(rotation)}°`,
-              WEBSITES.ROTATION_180_270,
-            );
-          }
 
-          // ======================================
-          // 270-360
-          // ======================================
-          else if (rotationRange === "270-360") {
-            showRedirect(
-              `ROTATED ${Math.round(rotation)}°`,
-              WEBSITES.ROTATION_270_360,
-            );
+          else if (rotationRange !== rotationTriggeredRef.current) {
+            if (!popupLockedRef.current) {
+              const previousRange = rotationTriggeredRef.current;
+
+              rotationTriggeredRef.current = rotationRange;
+
+              let bucket = 0;
+
+              if (rotationRange === "0-90") {
+                bucket = 0;
+              } else if (rotationRange === "90-180") {
+                bucket = 90;
+              } else if (rotationRange === "180-270") {
+                bucket = 180;
+              } else if (rotationRange === "270-360") {
+                bucket = 270;
+              }
+
+              const rotationAction = {
+                type: "ROTATION",
+                degree: Number(smoothedRotation.toFixed(2)),
+                range: rotationRange,
+                bucket,
+                previousRange,
+              };
+
+              console.log(
+                "ROTATION CHANGED:",
+                previousRange,
+                "→",
+                rotationRange,
+                `${smoothedRotation.toFixed(1)}°`,
+              );
+
+              setActive(
+                rotationRange === "0-90"
+                  ? "0"
+                  : rotationRange === "90-180"
+                    ? "90"
+                    : rotationRange === "180-270"
+                      ? "180"
+                      : "270",
+              );
+
+              onTriggerRef.current?.(rotationAction);
+
+              // ====================================
+              // POPUP MESSAGE
+              // ====================================
+              //
+              // 0-90 gets a distinct label so we can
+              // see it firing. The display side is
+              // responsible for mapping 0-90 to a
+              // real website.
+
+              if (rotationRange === "0-90") {
+                showRedirect("0-90 → FIRST SITE");
+              } else {
+                showRedirect(`ROTATED ${Math.round(smoothedRotation)}°`);
+              }
+            }
           }
         }
       }
 
       // ==========================================
-      // SWIPE MODE
+      // SWIPE MODE — DOMINANT AXIS DETECTOR
       // ==========================================
 
       if (modeRef.current === "SWIPE") {
         setLive("Swipe Mode");
 
-        // ========================================
-        // LEFT
-        // ========================================
-
-        if (xDifference < -MOVEMENT_THRESHOLD) {
-          if (movementTriggeredRef.current !== "LEFT") {
-            movementTriggeredRef.current = "LEFT";
-
-            onTriggerRef.current?.({
-              type: "MOVEMENT",
-              direction: "LEFT",
-              startX: startXRef.current,
-              currentX: centerX,
-              difference: xDifference,
-            });
-
-            showRedirect("LEFT", WEBSITES.LEFT);
-          }
-        }
+        const absX = Math.abs(xDifference);
+        const absY = Math.abs(yDifference);
 
         // ========================================
-        // RIGHT
-        // ========================================
-        else if (xDifference > MOVEMENT_THRESHOLD) {
-          if (movementTriggeredRef.current !== "RIGHT") {
-            movementTriggeredRef.current = "RIGHT";
-
-            onTriggerRef.current?.({
-              type: "MOVEMENT",
-              direction: "RIGHT",
-              startX: startXRef.current,
-              currentX: centerX,
-              difference: xDifference,
-            });
-
-            showRedirect("RIGHT", WEBSITES.RIGHT);
-          }
-        }
-
-        // ========================================
-        // UP
-        // ========================================
-        else if (yDifference < -MOVEMENT_THRESHOLD) {
-          if (movementTriggeredRef.current !== "UP") {
-            movementTriggeredRef.current = "UP";
-
-            onTriggerRef.current?.({
-              type: "MOVEMENT",
-              direction: "UP",
-              startY: startYRef.current,
-              currentY: centerY,
-              difference: yDifference,
-            });
-
-            showRedirect("UP", WEBSITES.UP);
-          }
-        }
-
-        // ========================================
-        // DOWN
-        // ========================================
-        else if (yDifference > MOVEMENT_THRESHOLD) {
-          if (movementTriggeredRef.current !== "DOWN") {
-            movementTriggeredRef.current = "DOWN";
-
-            onTriggerRef.current?.({
-              type: "MOVEMENT",
-              direction: "DOWN",
-              startY: startYRef.current,
-              currentY: centerY,
-              difference: yDifference,
-            });
-
-            showRedirect("DOWN", WEBSITES.DOWN);
-          }
-        }
-
-        // ========================================
-        // RETURN TO START
+        // RESET / UNLOCK
         // ========================================
 
         if (
-          Math.abs(xDifference) < MOVEMENT_THRESHOLD / 2 &&
-          Math.abs(yDifference) < MOVEMENT_THRESHOLD / 2
+          absX < MOVEMENT_RESET_THRESHOLD &&
+          absY < MOVEMENT_RESET_THRESHOLD
         ) {
-          movementTriggeredRef.current = "";
+          if (movementLockedRef.current) {
+            console.log("SWIPE: returned to start, unlocked");
+          }
+
+          movementLockedRef.current = false;
+
+          directionStreakRef.current = "";
+          directionStreakCountRef.current = 0;
+        }
+
+        // ========================================
+        // DETERMINE CANDIDATE DIRECTION
+        // ========================================
+
+        let candidate = "";
+
+        if (absX > MOVEMENT_THRESHOLD || absY > MOVEMENT_THRESHOLD) {
+          if (absX > absY) {
+            candidate = xDifference < 0 ? "LEFT" : "RIGHT";
+          } else {
+            candidate = yDifference < 0 ? "UP" : "DOWN";
+          }
+        }
+
+        // ========================================
+        // TRACK DIRECTIONAL STABILITY
+        // ========================================
+
+        if (candidate === "") {
+          directionStreakRef.current = "";
+          directionStreakCountRef.current = 0;
+        } else if (candidate === directionStreakRef.current) {
+          directionStreakCountRef.current += 1;
+        } else {
+          directionStreakRef.current = candidate;
+          directionStreakCountRef.current = 1;
+        }
+
+        // ========================================
+        // FIRE SWIPE
+        // ========================================
+
+        if (
+          !movementLockedRef.current &&
+          !popupLockedRef.current &&
+          candidate !== "" &&
+          directionStreakCountRef.current >= MOVEMENT_STABLE_FRAMES
+        ) {
+          movementLockedRef.current = true;
+
+          const action = {
+            type: "MOVEMENT",
+            direction: candidate,
+            startX: startXRef.current,
+            startY: startYRef.current,
+            currentX: centerX,
+            currentY: centerY,
+            differenceX: xDifference,
+            differenceY: yDifference,
+          };
+
+          console.log(
+            "SWIPE DETECTED:",
+            candidate,
+            `ΔX=${xDifference.toFixed(1)}`,
+            `ΔY=${yDifference.toFixed(1)}`,
+          );
+
+          onTriggerRef.current?.(action);
+
+          showRedirect(candidate);
+
+          directionStreakRef.current = "";
+          directionStreakCountRef.current = 0;
         }
       }
-
-      // ==========================================
-      // SAVE CURRENT CENTER
-      // ==========================================
-
-      previousCenterRef.current = {
-        x: centerX,
-        y: centerY,
-      };
     };
 
     // ==========================================
@@ -717,9 +763,13 @@ export default function CardRotationScanner({ onTrigger }) {
 
       cancelAnimationFrame(raf);
 
-      if (redirectTimeoutRef.current) {
-        clearTimeout(redirectTimeoutRef.current);
+      if (popupTimeoutRef.current) {
+        clearTimeout(popupTimeoutRef.current);
       }
+
+      rotationSamplesRef.current = [];
+
+      positionSamplesRef.current = [];
 
       stream?.getTracks().forEach((track) => track.stop());
     };
@@ -729,7 +779,9 @@ export default function CardRotationScanner({ onTrigger }) {
 
   return (
     <div className="min-h-[100dvh] flex flex-col bg-black text-white">
-      {/* CAMERA */}
+      {/* ========================================
+          CAMERA
+      ======================================== */}
 
       <div className="relative flex-1 min-h-0">
         <video ref={videoRef} playsInline muted className="hidden" />
@@ -740,7 +792,7 @@ export default function CardRotationScanner({ onTrigger }) {
         />
 
         {/* ========================================
-            REDIRECT POPUP
+            ACTION POPUP
         ======================================== */}
 
         {redirectVisible && (
@@ -752,7 +804,9 @@ export default function CardRotationScanner({ onTrigger }) {
 
               <p className="text-3xl font-bold">{redirectMessage}</p>
 
-              <p className="mt-3 text-sm text-neutral-500">Redirecting...</p>
+              <p className="mt-3 text-sm text-neutral-500">
+                Sending to display...
+              </p>
 
               <div className="mx-auto mt-5 h-1.5 w-full overflow-hidden rounded-full bg-neutral-200">
                 <div className="h-full w-full origin-left animate-[redirectProgress_1.5s_linear] rounded-full bg-black" />

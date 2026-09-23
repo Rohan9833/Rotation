@@ -11,11 +11,22 @@ export async function api(
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: {
+      Accept: "application/json",
+
+      // Bypass ngrok's free-tier browser warning
+      // page, which otherwise breaks CORS.
+      "ngrok-skip-browser-warning": "true",
+
       ...(body
-        ? { "Content-Type": "application/json" }
+        ? {
+            "Content-Type": "application/json",
+          }
         : {}),
+
       ...(token
-        ? { Authorization: `Bearer ${token}` }
+        ? {
+            Authorization: `Bearer ${token}`,
+          }
         : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -24,13 +35,16 @@ export async function api(
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
+    // Only treat 401 as "session expired" for
+    // authenticated business requests — NOT for
+    // the login endpoint or the session-restore
+    // endpoint itself.
     if (
       res.status === 401 &&
-      !path.startsWith("/api/auth/login")
+      !path.startsWith("/api/auth/login") &&
+      !path.startsWith("/api/auth/me")
     ) {
-      window.dispatchEvent(
-        new Event("auth:expired")
-      );
+      window.dispatchEvent(new Event("auth:expired"));
     }
 
     throw new Error(
