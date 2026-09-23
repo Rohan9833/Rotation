@@ -1,0 +1,8 @@
+{
+  "appId": "com.digilateral.phygitalcardsequence",
+  "appName": "phygital-card-sequence",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
